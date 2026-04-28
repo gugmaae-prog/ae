@@ -1,0 +1,349 @@
+/**
+ * Aether Edge Worker (Cloudflare Workers)
+ *
+ * Serves the static frontend and exposes JSON API routes used by Aether.
+ */
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Aether-Key'
+};
+
+function json(data, status = 200, extra = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      ...CORS_HEADERS,
+      ...extra
+    }
+  });
+}
+
+function withCors(resp) {
+  const h = new Headers(resp.headers);
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => h.set(k, v));
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+}
+
+function readReqJson(req) {
+  return req.json().catch(() => ({}));
+}
+
+function now() {
+  return new Date().toISOString();
+}
+
+function uid(prefix = 'id') {
+  return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36)}`;
+}
+
+async function listFromDb(db, table, limit = 100) {
+  const stmt = db.prepare(`SELECT * FROM ${table} ORDER BY created_at DESC LIMIT ?`);
+  const { results } = await stmt.bind(Math.max(1, Math.min(Number(limit) || 100, 500))).all();
+  return results || [];
+}
+
+async function ensureSchema(db) {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      role TEXT,
+      content TEXT,
+      metadata TEXT,
+      created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      type TEXT,
+      text TEXT,
+      metadata TEXT,
+      created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS plans (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      type TEXT,
+      status TEXT,
+      payload TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS contacts (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      email TEXT,
+      phone TEXT,
+      company TEXT,
+      title TEXT,
+      notes TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS emails (
+      id TEXT PRIMARY KEY,
+      direction TEXT,
+      from_email TEXT,
+      to_email TEXT,
+      subject TEXT,
+      body_text TEXT,
+      source TEXT,
+      created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS observations (
+      id TEXT PRIMARY KEY,
+      kind TEXT,
+      content TEXT,
+      metadata TEXT,
+      created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      status TEXT,
+      payload TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+  `);
+}
+
+async function handleApi(req, env, url) {
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+
+  const db = env.DB;
+  if (!db) {
+    return json({ error: 'DB binding missing. Configure D1 binding as DB.' }, 500);
+  }
+
+  await ensureSchema(db);
+
+  const path = url.pathname.replace(/^\/api/, '') || '/';
+
+  if (path === '/health' && req.method === 'GET') {
+    return json({ ok: true, db: true, ts: now() });
+  }
+
+  if (path === '/messages') {
+    if (req.method === 'GET') {
+      const limit = url.searchParams.get('limit') || '100';
+      return json({ messages: await listFromDb(db, 'messages', limit) });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const row = {
+        id: body.id || uid('msg'),
+        session_id: body.session_id || 'aether_default',
+        role: body.role || 'user',
+        content: String(body.content || ''),
+        metadata: JSON.stringify(body.metadata || {}),
+        created_at: now()
+      };
+      await db.prepare('INSERT INTO messages (id, session_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.session_id, row.role, row.content, row.metadata, row.created_at)
+        .run();
+      return json(row, 201);
+    }
+  }
+
+  if (path === '/memories') {
+    if (req.method === 'GET') {
+      const limit = url.searchParams.get('limit') || '100';
+      const rows = await listFromDb(db, 'memories', limit);
+      return json({ memories: rows.map(r => ({ ...r, content: r.text })) });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const row = {
+        id: body.id || uid('mem'),
+        type: body.type || 'note',
+        text: String(body.text || body.content || ''),
+        metadata: JSON.stringify(body.metadata || {}),
+        created_at: now()
+      };
+      await db.prepare('INSERT INTO memories (id, type, text, metadata, created_at) VALUES (?, ?, ?, ?, ?)')
+        .bind(row.id, row.type, row.text, row.metadata, row.created_at)
+        .run();
+      return json(row, 201);
+    }
+  }
+
+  if (path === '/plans') {
+    if (req.method === 'GET') {
+      return json({ plans: await listFromDb(db, 'plans', url.searchParams.get('limit') || '200') });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const ts = now();
+      const row = {
+        id: body.id || uid('plan'),
+        title: body.title || 'Untitled plan',
+        type: body.type || 'project',
+        status: body.status || 'active',
+        payload: JSON.stringify(body),
+        created_at: ts,
+        updated_at: ts
+      };
+      await db.prepare('INSERT OR REPLACE INTO plans (id, title, type, status, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.title, row.type, row.status, row.payload, row.created_at, row.updated_at)
+        .run();
+      return json(row, 201);
+    }
+  }
+
+  if (path === '/contacts') {
+    if (req.method === 'GET') {
+      return json({ contacts: await listFromDb(db, 'contacts', url.searchParams.get('limit') || '200') });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const ts = now();
+      const row = {
+        id: body.id || uid('contact'),
+        name: body.name || '',
+        email: body.email || '',
+        phone: body.phone || '',
+        company: body.company || '',
+        title: body.title || '',
+        notes: body.notes || '',
+        created_at: ts,
+        updated_at: ts
+      };
+      await db.prepare('INSERT OR REPLACE INTO contacts (id, name, email, phone, company, title, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.name, row.email, row.phone, row.company, row.title, row.notes, row.created_at, row.updated_at)
+        .run();
+      return json({ contact: row, id: row.id }, 201);
+    }
+  }
+
+  if (path.startsWith('/contacts/') && (req.method === 'GET' || req.method === 'PATCH' || req.method === 'PUT')) {
+    const rawId = decodeURIComponent(path.split('/')[2] || '');
+    const existing = await db.prepare('SELECT * FROM contacts WHERE id = ? OR lower(email) = lower(?) LIMIT 1').bind(rawId, rawId).first();
+    if (!existing) return json({ error: 'Not found' }, 404);
+
+    if (req.method === 'GET') return json({ contact: existing, emails: [] });
+
+    const patch = await readReqJson(req);
+    const merged = { ...existing, ...patch, updated_at: now() };
+    await db.prepare('INSERT OR REPLACE INTO contacts (id, name, email, phone, company, title, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(merged.id, merged.name || '', merged.email || '', merged.phone || '', merged.company || '', merged.title || '', merged.notes || '', merged.created_at || now(), merged.updated_at)
+      .run();
+    return json({ contact: merged, id: merged.id });
+  }
+
+  if (path === '/emails') {
+    if (req.method === 'GET') {
+      return json({ emails: await listFromDb(db, 'emails', url.searchParams.get('limit') || '200') });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const row = {
+        id: body.id || uid('email'),
+        direction: body.direction || 'in',
+        from_email: body.from_email || body.from || '',
+        to_email: body.to_email || body.to || '',
+        subject: body.subject || '',
+        body_text: body.body_text || body.body || '',
+        source: body.source || 'worker',
+        created_at: now()
+      };
+      await db.prepare('INSERT INTO emails (id, direction, from_email, to_email, subject, body_text, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.direction, row.from_email, row.to_email, row.subject, row.body_text, row.source, row.created_at)
+        .run();
+      return json(row, 201);
+    }
+  }
+
+  if (path === '/observations') {
+    if (req.method === 'GET') {
+      return json({ observations: await listFromDb(db, 'observations', url.searchParams.get('limit') || '200') });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const row = {
+        id: body.id || uid('obs'),
+        kind: body.kind || body.type || 'note',
+        content: String(body.content || ''),
+        metadata: JSON.stringify(body.metadata || {}),
+        created_at: now()
+      };
+      await db.prepare('INSERT INTO observations (id, kind, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)')
+        .bind(row.id, row.kind, row.content, row.metadata, row.created_at)
+        .run();
+      return json(row, 201);
+    }
+  }
+
+  if (path === '/tasks') {
+    if (req.method === 'GET') {
+      return json({ tasks: await listFromDb(db, 'tasks', url.searchParams.get('limit') || '200') });
+    }
+    if (req.method === 'POST') {
+      const body = await readReqJson(req);
+      const ts = now();
+      const row = {
+        id: body.id || uid('task'),
+        title: body.title || 'Untitled task',
+        status: body.status || 'open',
+        payload: JSON.stringify(body),
+        created_at: ts,
+        updated_at: ts
+      };
+      await db.prepare('INSERT OR REPLACE INTO tasks (id, title, status, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.title, row.status, row.payload, row.created_at, row.updated_at)
+        .run();
+      return json(row, 201);
+    }
+  }
+
+  if (path === '/send' && req.method === 'POST') {
+    const body = await readReqJson(req);
+    return json({ ok: true, queued: true, provider: 'stub', from: body.from || '', to: body.to || '', ts: now() });
+  }
+
+  if (path === '/chat' && req.method === 'POST') {
+    const body = await readReqJson(req);
+    const prompt = String(body.prompt || '').trim();
+    return json({
+      provider: 'worker-stub',
+      text: prompt
+        ? `Received your request: "${prompt.slice(0, 280)}". Worker /api/chat is live; connect AI provider secrets to return model output.`
+        : 'Worker /api/chat is live. Send a prompt to receive model output.'
+    });
+  }
+
+  return json({ error: 'Not found', path, method: req.method }, 404);
+}
+
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+
+    if (url.pathname.startsWith('/api/')) {
+      return handleApi(req, env, url);
+    }
+
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    // Serve static frontend from ASSETS binding when configured.
+    if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
+      return withCors(await env.ASSETS.fetch(req));
+    }
+
+    // Fallback plain response for misconfigured deployments.
+    return withCors(new Response('Aether worker is running. Configure ASSETS binding to serve frontend.', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+    }));
+  }
+};
