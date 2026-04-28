@@ -1,0 +1,7 @@
+name = "aether-edge"
+main = "aejs"
+compatibility_date = "2026-04-28"
+workers_dev = true
+
+# Bindings like DB (D1) and ASSETS can be attached in Cloudflare dashboard
+# or later committed here once IDs are known.
