@@ -3770,9 +3770,15 @@ window.addEventListener('orientationchange',()=>setTimeout(applyAdaptiveLayout,6
 if(window.visualViewport){ window.visualViewport.addEventListener('resize',applyAdaptiveLayout,{passive:true}); }
 
 // ── NAV / TABS ────────────────────────────────────────────────────
-function switchView(name){
+function switchView(name, shouldPush=true){
+  const viewMap={today:'todayView',chat:'chatView',plans:'plansView',emails:'emailsView',contacts:'contactsView',contactDetail:'contactDetailView',planningDetail:'planningDetailView',journal:'journalView',analysis:'analysisView'};
+  const targetId=viewMap[name]||(name+'View');
+  if(!document.getElementById(targetId)){
+    if(name!=='today'&&document.getElementById('todayView')){name='today';}
+  }
+  const finalId=viewMap[name]||(name+'View');
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.view===name));
-  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id===name+'View'));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id===finalId));
   if(name==='emails'){
     loadEmails(true);
     // Server-side sync on every inbox open (uses stored token, no browser auth needed)
@@ -4706,7 +4712,7 @@ setTimeout(() => {
 document.getElementById('answerReviewClose')?.addEventListener('click',closeAnswerReview);
 document.getElementById('answerReviewModal')?.addEventListener('click',e=>{if(e.target===document.getElementById('answerReviewModal'))closeAnswerReview()});
 window.switchView=switchView;
-window.AetherSelf=AetherSelf;window.openCompose=openCompose;window.importContactsFromDriveSelected=importContactsFromDriveSelected;window.analyzeContact=analyzeContact;window.openAnswerReview=openAnswerReview;window.markHeadlineFeedback=markHeadlineFeedback;window.SB=SB;window.StageManager=StageManager;
+window.AetherSelf=(typeof AetherSelf!=='undefined'?AetherSelf:window.AetherSelf);window.openCompose=(typeof openCompose==='function'?openCompose:window.openCompose);window.importContactsFromDriveSelected=(typeof importContactsFromDriveSelected==='function'?importContactsFromDriveSelected:window.importContactsFromDriveSelected);window.analyzeContact=(typeof analyzeContact==='function'?analyzeContact:window.analyzeContact);window.openAnswerReview=(typeof openAnswerReview==='function'?openAnswerReview:window.openAnswerReview);window.markHeadlineFeedback=(typeof markHeadlineFeedback==='function'?markHeadlineFeedback:window.markHeadlineFeedback);window.SB=(typeof SB!=='undefined'?SB:window.SB);window.StageManager=(typeof StageManager!=='undefined'?StageManager:window.StageManager);
 
 /* ─────────────────────────────────────────────────────────────────
    SLASH COMMANDS — replaces the per-field "Draft with Aether" ⌘ buttons
